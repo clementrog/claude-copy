@@ -55,7 +55,7 @@ Claude asks you to pick between three options and you don't know which.
 ## Install
 
 ```bash
-git clone https://github.com/clmusic/claude-copy.git && cd claude-copy && ./install.sh
+git clone https://github.com/clementrog/claude-copy.git && cd claude-copy && ./install.sh
 ```
 
 Auto-detects Kitty vs iTerm2.
@@ -125,12 +125,12 @@ That's why it's instant and always copies from the right tab.
 |---|---|
 | **Kitty** | Supported, recommended |
 | **iTerm2** | Supported |
-| **Ghostty** | [Help us add it →](https://github.com/clmusic/claude-copy/issues) |
+| **Ghostty** | [Help us add it →](https://github.com/clementrog/claude-copy/issues) |
 | **Warp** | PRs welcome |
 | **Zed terminal** | PRs welcome |
 | **macOS Terminal** | Not supported (no tab PID API) |
 
-`claude-copy` needs a way to get the focused tab's process ID. If your terminal exposes this, [open an issue](https://github.com/clmusic/claude-copy/issues).
+`claude-copy` needs a way to get the focused tab's process ID. If your terminal exposes this, [open an issue](https://github.com/clementrog/claude-copy/issues).
 
 ---
 
@@ -166,4 +166,4 @@ MIT
 
 ---
 
-**If this saves you time, [star the repo](https://github.com/clmusic/claude-copy).**
+**If this saves you time, [star the repo](https://github.com/clementrog/claude-copy).**
