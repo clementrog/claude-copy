@@ -1,48 +1,71 @@
 # claude-copy
 
-Copy Claude Code output to your clipboard with a keyboard shortcut. No text selection needed.
+**Copy Claude Code output from the focused tab. Instantly.**
 
-When you're running Claude Code in your terminal and want to grab a response, a plan, or a set of questions — just hit a shortcut and paste wherever you need it.
+Last response. Latest plan. Exact `AskUserQuestion` prompt + options.
 
-## Shortcuts
+No mouse. No scrolling. No text selection.
 
-| Shortcut | What it copies |
-|---|---|
-| `Cmd+Shift+C` | Last text response |
-| `Cmd+Shift+P` | Plan (full `.md` content) |
-| `Cmd+Shift+A` | Last question + all answer options |
+![Demo](./assets/demo.gif)
 
-**Tab-aware**: if you have multiple Claude Code sessions across tabs, the shortcut always copies from the tab you're looking at.
-
-## Supported terminals
-
-| Terminal | Status | How |
-|---|---|---|
-| **Kitty** | Supported | Remote control API (`kitten @ ls`) |
-| **iTerm2** | Supported | Python API + RPC functions |
-| Ghostty | Not yet | Waiting on remote control API ([#8797](https://github.com/ghostty-org/ghostty/discussions/8797)) |
-| Zed / macOS Terminal | Not yet | No terminal plugin API available |
-
-## Quick start
-
-```bash
-git clone https://github.com/clmusic/claude-copy.git
-cd claude-copy
-./install.sh
-```
-
-The installer detects which terminal(s) you have and sets up accordingly.
+![macOS](https://img.shields.io/badge/platform-macOS-black)
+![Kitty/iTerm2](https://img.shields.io/badge/terminals-Kitty%20%7C%20iTerm2-black)
+![MIT License](https://img.shields.io/badge/license-MIT-black)
 
 ---
 
-## Kitty
+| Shortcut | Copies |
+|---|---|
+| `Cmd+Shift+C` | Last Claude Code response |
+| `Cmd+Shift+P` | Latest plan (from `.claude/plans/`) |
+| `Cmd+Shift+A` | Last `AskUserQuestion` + answer options |
 
-### What the installer does
+> Suggested defaults — remap if these conflict with your existing shortcuts.
 
-1. Copies `claude-copy-last` to `~/.local/bin/`
-2. Prints the config snippet to add to `~/.config/kitty/kitty.conf`
+---
 
-### Config to add
+## Built for double-tap
+
+Ask Claude Code to think, plan, or build → copy the output → paste into a second model for review.
+
+Better quality. Fewer blind spots. Less back-and-forth.
+
+**claude-copy makes the handoff instant.**
+
+### Review plans before execution
+
+Claude Code writes a plan. You want a second opinion before hitting Enter.
+
+`Cmd+Shift+P` → paste into ChatGPT / Gemini → *"Find the bugs in this plan before I let Claude run it."*
+
+### Second opinion on long answers
+
+Claude finishes a complex implementation. You're not sure about the approach.
+
+`Cmd+Shift+C` → paste into another model → *"Review this. What did it miss?"*
+
+### Let a reasoning model pick when Claude gets stuck
+
+Claude asks you to pick between three options and you don't know which.
+
+`Cmd+Shift+A` → paste the exact question + options into o1 / Gemini → *"Which option should I pick and why?"*
+
+---
+
+## Install
+
+```bash
+git clone https://github.com/clmusic/claude-copy.git && cd claude-copy && ./install.sh
+```
+
+Auto-detects Kitty vs iTerm2.
+
+<details open>
+<summary><strong>Kitty</strong> (recommended)</summary>
+
+The installer copies `claude-copy-last` to `~/.local/bin/` and tells you what to add to your Kitty config.
+
+Add to `~/.config/kitty/kitty.conf` if not already present:
 
 ```conf
 allow_remote_control yes
@@ -53,81 +76,94 @@ map cmd+shift+p launch --type=background sh -c '~/.local/bin/claude-copy-last --
 map cmd+shift+a launch --type=background sh -c '~/.local/bin/claude-copy-last --ask | pbcopy'
 ```
 
-Restart Kitty after adding these lines.
+Restart Kitty. Done.
 
-### Linux
+CLI usage:
 
-Replace `pbcopy` with your clipboard tool:
-
-```conf
-# X11
-map ctrl+shift+c launch --type=background sh -c '~/.local/bin/claude-copy-last | xclip -selection clipboard'
-
-# Wayland
-map ctrl+shift+c launch --type=background sh -c '~/.local/bin/claude-copy-last | wl-copy'
+```bash
+claude-copy-last | pbcopy           # last response
+claude-copy-last --plan | pbcopy    # plan
+claude-copy-last --ask | pbcopy     # last question + options
+claude-copy-last --help             # all options
 ```
 
----
+</details>
 
-## iTerm2
+<details>
+<summary><strong>iTerm2</strong> (supported, more manual)</summary>
 
-### What the installer does
+The installer copies the script to `~/Library/Application Support/iTerm2/Scripts/AutoLaunch/claude_copy.py`.
 
-Copies `claude_copy.py` to `~/Library/Application Support/iTerm2/Scripts/AutoLaunch/` so it starts automatically with iTerm2.
+One-time setup:
 
-### Manual steps after install
-
-1. **Enable Python API**
-   Preferences → General → Magic → check *Enable Python API*
-
-2. **Install Python Runtime**
-   Scripts menu → Manage → Install Python Runtime
-
+1. **Enable Python API** — Preferences → General → Magic → Enable Python API
+2. **Install runtime** — Scripts → Manage → Install Python Runtime
 3. **Restart iTerm2**
+4. **Add key bindings** — Preferences → Keys → Key Bindings → Action: "Invoke Script Function"
 
-4. **Bind keys**
-   Preferences → Keys → Key Bindings → click **+**
+| Shortcut | Function |
+|---|---|
+| `Cmd+Shift+C` | `claude_copy_response(session_id: id)` |
+| `Cmd+Shift+P` | `claude_copy_plan(session_id: id)` |
+| `Cmd+Shift+A` | `claude_copy_ask(session_id: id)` |
 
-   | Shortcut | Action | Function |
-   |---|---|---|
-   | `Cmd+Shift+C` | Invoke Script Function | `claude_copy_response(session_id: id)` |
-   | `Cmd+Shift+P` | Invoke Script Function | `claude_copy_plan(session_id: id)` |
-   | `Cmd+Shift+A` | Invoke Script Function | `claude_copy_ask(session_id: id)` |
+</details>
 
 ---
 
 ## How it works
 
-Claude Code stores session transcripts as JSONL files in `~/.claude/projects/` and maps running sessions to PIDs in `~/.claude/sessions/`.
+Not terminal scraping. `claude-copy` finds the focused tab's process, maps it to the right Claude Code session in `~/.claude/`, reads the JSONL transcript, and copies the requested content. It doesn't care about your font size, window dimensions, or ANSI colors — it reads the raw session data.
 
-The script:
+That's why it's instant and always copies from the right tab.
 
-1. Asks the terminal which process is running in the focused tab
-2. Walks up the process tree until it finds a matching Claude Code session
-3. Reads that session's JSONL transcript
-4. Extracts the requested content (last response, plan file, or question block)
-5. Pipes it to the clipboard
+---
 
-Plans are stored as separate `.md` files in `~/.claude/plans/`. The script finds the plan path from the transcript and reads the file directly.
+## Terminal support
 
-## CLI usage
+| Terminal | Status |
+|---|---|
+| **Kitty** | Supported, recommended |
+| **iTerm2** | Supported |
+| **Ghostty** | [Help us add it →](https://github.com/clmusic/claude-copy/issues) |
+| **Warp** | PRs welcome |
+| **Zed terminal** | PRs welcome |
+| **macOS Terminal** | Not supported (no tab PID API) |
 
-```bash
-claude-copy-last              # prints last response to stdout
-claude-copy-last --plan       # prints plan
-claude-copy-last --ask        # prints questions + options
+`claude-copy` needs a way to get the focused tab's process ID. If your terminal exposes this, [open an issue](https://github.com/clmusic/claude-copy/issues).
 
-claude-copy-last --help       # usage info
-```
+---
 
-Pipe to `pbcopy` yourself, or use the keyboard shortcuts.
+## Stability
+
+Reads Claude Code's local session files in `~/.claude/`. If Anthropic changes the session format, extraction logic may need updates.
+
+---
 
 ## Requirements
 
+- macOS
 - Python 3.8+
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
-- Kitty or iTerm2 on macOS (Linux supported for Kitty)
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
+- Kitty or iTerm2
+
+---
+
+## Contributing
+
+Issues and PRs welcome. High-value contributions:
+
+- **Terminal support** — Ghostty, Warp, Zed
+- **Linux support**
+- **`--json` flag** for structured output
+- Better error handling and diagnostics
+
+---
 
 ## License
 
 MIT
+
+---
+
+**If this saves you time, [star the repo](https://github.com/clmusic/claude-copy).**
