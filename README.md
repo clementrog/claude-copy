@@ -17,9 +17,9 @@ No mouse. No scrolling. No text selection.
 
 | Shortcut | Copies |
 |---|---|
-| `Cmd+Shift+C` | Last Claude Code response |
-| `Cmd+Shift+P` | Latest plan (from `.claude/plans/`) |
-| `Cmd+Shift+A` | Last `AskUserQuestion` + answer options |
+| `Cmd+Shift+C` | Last Claude Code response in active tab |
+| `Cmd+Shift+P` | Latest plan (from `.claude/plans/`) in active tab |
+| `Cmd+Shift+A` | Last `AskUserQuestion` + answer options in active tab |
 
 > Suggested defaults — remap if these conflict with your existing shortcuts.
 
@@ -27,29 +27,21 @@ No mouse. No scrolling. No text selection.
 
 ## Built for double-tap
 
-Ask Claude Code to think, plan, or build → copy the output → paste into a second model for review.
-
-Better quality. Fewer blind spots. Less back-and-forth.
+Ask Claude Code to think, plan, or build → copy the output → paste into a second model for review. Better quality. Fewer blind spots. Less back-and-forth.
 
 **claude-copy makes the handoff instant.**
 
 ### Review plans before execution
 
-Claude Code writes a plan. You want a second opinion before hitting Enter.
-
-`Cmd+Shift+P` → paste into ChatGPT / Gemini → *"Find the bugs in this plan before I let Claude run it."*
+Claude Code writes a plan. You want a second opinion before hitting Enter. `Cmd+Shift+P` → paste into ChatGPT / Gemini → *"Find the bugs in this plan before I let Claude run it."*
 
 ### Second opinion on long answers
 
-Claude finishes a complex implementation. You're not sure about the approach.
-
-`Cmd+Shift+C` → paste into another model → *"Review this. What did it miss?"*
+Claude finishes a complex implementation. You're not sure about the approach. `Cmd+Shift+C` → paste into another model → *"Review this. What did it miss?"*
 
 ### Let a reasoning model pick when Claude gets stuck
 
-Claude asks you to pick between three options and you don't know which.
-
-`Cmd+Shift+A` → paste the exact question + options into o1 / Gemini → *"Which option should I pick and why?"*
+Claude asks you to pick between three options and you don't know which. `Cmd+Shift+A` → paste the exact question + options into Gpt 5.4 / Gemini → *"Which option should I pick and why?"*
 
 ---
 
@@ -82,9 +74,9 @@ Restart Kitty. Done.
 CLI usage:
 
 ```bash
-claude-copy-last | pbcopy           # last response
-claude-copy-last --plan | pbcopy    # plan
-claude-copy-last --ask | pbcopy     # last question + options
+claude-copy-last | pbcopy           # last response in active tab
+claude-copy-last --plan | pbcopy    # plan in active tab
+claude-copy-last --ask | pbcopy     # last question + options in active tab
 claude-copy-last --help             # all options
 ```
 
