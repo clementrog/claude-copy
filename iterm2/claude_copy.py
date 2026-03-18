@@ -24,14 +24,25 @@ import os
 import re
 import glob
 import subprocess
+import logging
+
+LOG_PATH = os.path.expanduser("~/.claude/claude-copy-iterm2.log")
+logging.basicConfig(
+    filename=LOG_PATH,
+    level=logging.DEBUG,
+    format="%(asctime)s %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("claude-copy")
 
 
-# ── Claude Code transcript helpers (shared logic with claude-copy-last) ──
+# ── Claude Code transcript helpers ──
 
 
 def find_session_by_pid(pids):
     sessions_dir = os.path.expanduser("~/.claude/sessions")
     if not os.path.isdir(sessions_dir):
+        log.debug("sessions dir not found")
         return None
 
     session_map = {}
@@ -43,6 +54,9 @@ def find_session_by_pid(pids):
         except Exception:
             continue
 
+    log.debug(f"session_map PIDs: {sorted(session_map.keys())}")
+    log.debug(f"searching from PIDs: {pids}")
+
     checked = set()
     to_check = list(pids)
     while to_check:
@@ -51,6 +65,7 @@ def find_session_by_pid(pids):
             continue
         checked.add(pid)
         if pid in session_map:
+            log.debug(f"matched session at pid={pid}")
             return session_map[pid]
         try:
             out = subprocess.check_output(
@@ -60,8 +75,10 @@ def find_session_by_pid(pids):
             ppid = int(out.strip())
             to_check.append(ppid)
         except Exception:
+            log.debug(f"ps failed for pid={pid} (process gone)")
             continue
 
+    log.debug(f"no match found. checked: {sorted(checked)}")
     return None
 
 
@@ -71,6 +88,7 @@ def get_session_lines(session_id, cwd):
         f"~/.claude/projects/{project_slug}/{session_id}.jsonl"
     )
     if not os.path.isfile(jsonl_path):
+        log.debug(f"JSONL not found: {jsonl_path}")
         return []
     with open(jsonl_path) as f:
         return f.readlines()
@@ -99,7 +117,6 @@ def extract_last_response(lines):
 
 
 def extract_plan(lines):
-    plan_path = None
     for line in reversed(lines):
         obj = json.loads(line)
         if obj.get("type") != "assistant" or obj.get("isSidechain"):
@@ -107,21 +124,20 @@ def extract_plan(lines):
         content = obj.get("message", {}).get("content", [])
         if not isinstance(content, list):
             continue
-        for block in content:
+        for block in reversed(content):
             if block.get("type") != "tool_use":
                 continue
-            if block.get("name") not in ("Write", "Edit"):
-                continue
-            fp = block.get("input", {}).get("file_path", "")
-            if "/.claude/plans/" in fp:
-                plan_path = fp
-                break
-        if plan_path:
-            break
-
-    if plan_path and os.path.isfile(plan_path):
-        with open(plan_path) as f:
-            return f.read().strip()
+            if block.get("name") == "ExitPlanMode":
+                plan_text = block.get("input", {}).get("plan", "")
+                if plan_text.strip():
+                    log.debug(f"found plan in ExitPlanMode ({len(plan_text)} chars)")
+                    return plan_text.strip()
+            if block.get("name") in ("Write", "Edit"):
+                fp = block.get("input", {}).get("file_path", "")
+                if "/.claude/plans/" in fp and os.path.isfile(fp):
+                    log.debug(f"found plan file: {fp}")
+                    with open(fp) as f:
+                        return f.read().strip()
     return None
 
 
@@ -176,17 +192,15 @@ def copy_to_clipboard(text):
 
 
 def notify(title, message):
-    subprocess.run(
-        [
-            "osascript", "-e",
-            f'display notification "{message}" with title "{title}"',
-        ],
+    escaped = message.replace("\\", "\\\\").replace('"', '\\"')
+    subprocess.Popen(
+        ["osascript", "-e", f'display notification "{escaped}" with title "{title}"'],
         stderr=subprocess.DEVNULL,
     )
 
 
 def do_copy(job_pid, root_pid, mode):
-    """Core logic: find session, extract content, copy to clipboard."""
+    """Find session, extract content, copy to clipboard. Returns (success, message)."""
     label = MODE_LABELS.get(mode, mode)
     pids = set()
     if job_pid:
@@ -194,16 +208,20 @@ def do_copy(job_pid, root_pid, mode):
     if root_pid:
         pids.add(int(root_pid))
 
+    log.debug(f"do_copy mode={mode} jobPid={job_pid} rootPid={root_pid}")
+
     if not pids:
-        return "No PIDs available"
+        return (False, "No PIDs available")
 
     session = find_session_by_pid(pids)
     if not session:
-        return "No Claude Code session found for this tab"
+        return (False, "No Claude Code session in this tab")
+
+    log.debug(f"found session: {session['sessionId'][:12]}... cwd={session['cwd']}")
 
     lines = get_session_lines(session["sessionId"], session["cwd"])
     if not lines:
-        return "Session transcript is empty"
+        return (False, "Session transcript is empty")
 
     if mode == "plan":
         result = extract_plan(lines)
@@ -213,11 +231,11 @@ def do_copy(job_pid, root_pid, mode):
         result = extract_last_response(lines)
 
     if not result:
-        return f"No {label.lower()} found"
+        return (False, f"No {label.lower()} found")
 
     copy_to_clipboard(result)
-    notify("claude-copy", f"{label} copied")
-    return None
+    log.debug(f"copied {len(result)} chars to clipboard")
+    return (True, f"{label} copied")
 
 
 # ── iTerm2 RPC registration ──
@@ -225,39 +243,37 @@ def do_copy(job_pid, root_pid, mode):
 
 async def main(connection):
     app = await iterm2.async_get_app(connection)
+    log.info("claude-copy RPC registered")
+
+    async def _do(session_id, mode):
+        # Re-fetch app to get fresh state
+        app_now = await iterm2.async_get_app(connection)
+        window = app_now.current_window
+        if not window:
+            notify("claude-copy", "No active window")
+            return
+        iterm_session = window.current_tab.current_session
+        if not iterm_session:
+            notify("claude-copy", "No active session")
+            return
+        job_pid = await iterm_session.async_get_variable("jobPid")
+        root_pid = await iterm_session.async_get_variable("pid")
+        tty = await iterm_session.async_get_variable("tty")
+        log.debug(f"_do: mode={mode} session_id={iterm_session.session_id} jobPid={job_pid} pid={root_pid} tty={tty}")
+        success, message = do_copy(job_pid, root_pid, mode)
+        notify("claude-copy", message)
 
     @iterm2.RPC
     async def claude_copy_response(session_id=iterm2.Reference("id")):
-        session = app.get_session_by_id(session_id)
-        if not session:
-            return
-        job_pid = await session.async_get_variable("jobPid")
-        root_pid = await session.async_get_variable("pid")
-        err = do_copy(job_pid, root_pid, "text")
-        if err:
-            notify("claude-copy", err)
+        await _do(session_id, "text")
 
     @iterm2.RPC
     async def claude_copy_plan(session_id=iterm2.Reference("id")):
-        session = app.get_session_by_id(session_id)
-        if not session:
-            return
-        job_pid = await session.async_get_variable("jobPid")
-        root_pid = await session.async_get_variable("pid")
-        err = do_copy(job_pid, root_pid, "plan")
-        if err:
-            notify("claude-copy", err)
+        await _do(session_id, "plan")
 
     @iterm2.RPC
     async def claude_copy_ask(session_id=iterm2.Reference("id")):
-        session = app.get_session_by_id(session_id)
-        if not session:
-            return
-        job_pid = await session.async_get_variable("jobPid")
-        root_pid = await session.async_get_variable("pid")
-        err = do_copy(job_pid, root_pid, "ask")
-        if err:
-            notify("claude-copy", err)
+        await _do(session_id, "ask")
 
     await claude_copy_response.async_register(connection)
     await claude_copy_plan.async_register(connection)

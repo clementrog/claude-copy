@@ -139,8 +139,7 @@ def extract_last_response(lines):
 
 
 def extract_plan(lines):
-    """Find the last plan file written in the session and read it."""
-    plan_path = None
+    """Extract the plan from ExitPlanMode in this session's transcript."""
     for line in reversed(lines):
         obj = json.loads(line)
         if obj.get("type") != "assistant" or obj.get("isSidechain"):
@@ -148,21 +147,20 @@ def extract_plan(lines):
         content = obj.get("message", {}).get("content", [])
         if not isinstance(content, list):
             continue
-        for block in content:
+        for block in reversed(content):
             if block.get("type") != "tool_use":
                 continue
-            if block.get("name") not in ("Write", "Edit"):
-                continue
-            fp = block.get("input", {}).get("file_path", "")
-            if "/.claude/plans/" in fp:
-                plan_path = fp
-                break
-        if plan_path:
-            break
-
-    if plan_path and os.path.isfile(plan_path):
-        with open(plan_path) as f:
-            return f.read().strip()
+            # Prefer ExitPlanMode which has the plan inline
+            if block.get("name") == "ExitPlanMode":
+                plan_text = block.get("input", {}).get("plan", "")
+                if plan_text.strip():
+                    return plan_text.strip()
+            # Fall back to Write to plans dir within this session
+            if block.get("name") in ("Write", "Edit"):
+                fp = block.get("input", {}).get("file_path", "")
+                if "/.claude/plans/" in fp and os.path.isfile(fp):
+                    with open(fp) as f:
+                        return f.read().strip()
     return None
 
 
