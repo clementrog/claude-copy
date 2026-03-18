@@ -6,7 +6,8 @@ Last response. Latest plan. Exact `AskUserQuestion` prompt + options.
 
 No mouse. No scrolling. No text selection.
 
-![Demo](./assets/demo.gif)
+![Copy plan](./assets/copy-plan.gif)
+![Copy questions + answers](./assets/copy-questions-answers.gif)
 
 ![macOS](https://img.shields.io/badge/platform-macOS-black)
 ![Kitty/iTerm2](https://img.shields.io/badge/terminals-Kitty%20%7C%20iTerm2-black)
