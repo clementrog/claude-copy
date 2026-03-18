@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""Copy Claude Code content from the active Kitty tab's clipboard.
+
+Reads Claude Code's JSONL session transcripts and extracts content
+by matching the focused Kitty tab to a running Claude Code session.
+
+Usage:
+  claude-copy-last          # last text response
+  claude-copy-last --plan   # plan file content
+  claude-copy-last --ask    # last AskUserQuestion (questions + options)
+
+Requires:
+  - Kitty terminal with allow_remote_control and listen_on configured
+  - Python 3.8+
+  - Claude Code CLI
+"""
+import json, os, re, glob, subprocess, sys, shutil, platform
+
+
+def find_kitten():
+    """Find the kitten binary across platforms."""
+    # Check PATH first
+    kitten = shutil.which("kitten")
+    if kitten:
+        return kitten
+    # macOS app bundle
+    if platform.system() == "Darwin":
+        app_path = "/Applications/kitty.app/Contents/MacOS/kitten"
+        if os.path.isfile(app_path):
+            return app_path
+    return None
+
+
+def find_kitty_socket():
+    """Find the kitty unix socket."""
+    # Check env first (set when shell integration works)
+    listen_on = os.environ.get("KITTY_LISTEN_ON")
+    if listen_on:
+        return listen_on.replace("unix:", "")
+    # Fall back to /tmp/kitty-* sockets
+    sockets = glob.glob("/tmp/kitty-*")
+    return sockets[0] if sockets else None
+
+
+def get_foreground_pids(kitten_bin, socket_path):
+    """Get foreground process PIDs from the focused kitty window."""
+    try:
+        out = subprocess.check_output(
+            [kitten_bin, "@", "--to", f"unix:{socket_path}", "ls"],
+            stderr=subprocess.DEVNULL,
+        )
+        data = json.loads(out)
+        pids = set()
+        for os_win in data:
+            for tab in os_win.get("tabs", []):
+                if not tab.get("is_focused"):
+                    continue
+                for win in tab.get("windows", []):
+                    if not win.get("is_focused"):
+                        continue
+                    for fp in win.get("foreground_processes", []):
+                        pids.add(fp["pid"])
+                    pids.add(win.get("pid", 0))
+        return pids
+    except Exception:
+        return set()
+
+
+def find_session_by_pid(pids):
+    """Walk up process trees to find a matching Claude Code session."""
+    sessions_dir = os.path.expanduser("~/.claude/sessions")
+    if not os.path.isdir(sessions_dir):
+        return None
+
+    session_map = {}
+    for f in glob.glob(os.path.join(sessions_dir, "*.json")):
+        try:
+            with open(f) as fh:
+                s = json.load(fh)
+                session_map[s["pid"]] = s
+        except Exception:
+            continue
+
+    checked = set()
+    to_check = list(pids)
+    while to_check:
+        pid = to_check.pop()
+        if pid in checked or pid <= 1:
+            continue
+        checked.add(pid)
+        if pid in session_map:
+            return session_map[pid]
+        try:
+            out = subprocess.check_output(
+                ["ps", "-o", "ppid=", "-p", str(pid)],
+                stderr=subprocess.DEVNULL,
+            )
+            ppid = int(out.strip())
+            to_check.append(ppid)
+        except Exception:
+            continue
+
+    return None
+
+
+def get_session_lines(session_id, cwd):
+    """Read JSONL lines from a Claude Code session transcript."""
+    project_slug = cwd.replace("/", "-")
+    jsonl_path = os.path.expanduser(
+        f"~/.claude/projects/{project_slug}/{session_id}.jsonl"
+    )
+    if not os.path.isfile(jsonl_path):
+        return []
+    with open(jsonl_path) as f:
+        return f.readlines()
+
+
+def extract_last_response(lines):
+    """Extract the last assistant text response."""
+    for line in reversed(lines):
+        obj = json.loads(line)
+        if obj.get("type") != "assistant" or obj.get("isSidechain"):
+            continue
+        content = obj.get("message", {}).get("content", [])
+        if not isinstance(content, list):
+            continue
+        texts = []
+        for block in content:
+            if block.get("type") == "text":
+                t = block.get("text", "").strip()
+                t = re.sub(
+                    r"<system-reminder>.*?</system-reminder>", "", t, flags=re.DOTALL
+                ).strip()
+                if t:
+                    texts.append(t)
+        if texts:
+            return "\n\n".join(texts)
+    return None
+
+
+def extract_plan(lines):
+    """Find the last plan file written in the session and read it."""
+    plan_path = None
+    for line in reversed(lines):
+        obj = json.loads(line)
+        if obj.get("type") != "assistant" or obj.get("isSidechain"):
+            continue
+        content = obj.get("message", {}).get("content", [])
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if block.get("type") != "tool_use":
+                continue
+            if block.get("name") not in ("Write", "Edit"):
+                continue
+            fp = block.get("input", {}).get("file_path", "")
+            if "/.claude/plans/" in fp:
+                plan_path = fp
+                break
+        if plan_path:
+            break
+
+    if plan_path and os.path.isfile(plan_path):
+        with open(plan_path) as f:
+            return f.read().strip()
+    return None
+
+
+def format_ask(input_data):
+    """Format AskUserQuestion data as readable text."""
+    parts = []
+    for q in input_data.get("questions", []):
+        header = q.get("header", "")
+        question = q.get("question", "")
+        multi = q.get("multiSelect", False)
+
+        if header:
+            parts.append(f"## {header}")
+        parts.append(question)
+        if multi:
+            parts.append("(multiple choice)")
+        parts.append("")
+
+        for i, opt in enumerate(q.get("options", []), 1):
+            label = opt.get("label", "")
+            desc = opt.get("description", "")
+            if desc:
+                parts.append(f"  {i}. {label} -- {desc}")
+            else:
+                parts.append(f"  {i}. {label}")
+        parts.append("")
+
+    return "\n".join(parts).strip()
+
+
+def extract_last_ask(lines):
+    """Extract the last AskUserQuestion tool use."""
+    for line in reversed(lines):
+        obj = json.loads(line)
+        if obj.get("type") != "assistant" or obj.get("isSidechain"):
+            continue
+        content = obj.get("message", {}).get("content", [])
+        if not isinstance(content, list):
+            continue
+        for block in reversed(content):
+            if (
+                block.get("type") == "tool_use"
+                and block.get("name") == "AskUserQuestion"
+            ):
+                return format_ask(block.get("input", {}))
+    return None
+
+
+def main():
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print(__doc__.strip())
+        sys.exit(0)
+
+    if "--plan" in sys.argv:
+        mode = "plan"
+    elif "--ask" in sys.argv:
+        mode = "ask"
+    else:
+        mode = "text"
+
+    kitten_bin = find_kitten()
+    if not kitten_bin:
+        print("Error: kitten binary not found. Is Kitty installed?", file=sys.stderr)
+        sys.exit(1)
+
+    socket_path = find_kitty_socket()
+    if not socket_path:
+        print("Error: no Kitty socket found. Is listen_on configured?", file=sys.stderr)
+        sys.exit(1)
+
+    pids = get_foreground_pids(kitten_bin, socket_path)
+    if not pids:
+        print("Error: could not get foreground PIDs from Kitty.", file=sys.stderr)
+        sys.exit(1)
+
+    session = find_session_by_pid(pids)
+    if not session:
+        print("Error: no Claude Code session found for the active tab.", file=sys.stderr)
+        sys.exit(1)
+
+    lines = get_session_lines(session["sessionId"], session["cwd"])
+    if not lines:
+        print("Error: session transcript is empty.", file=sys.stderr)
+        sys.exit(1)
+
+    if mode == "plan":
+        result = extract_plan(lines)
+    elif mode == "ask":
+        result = extract_last_ask(lines)
+    else:
+        result = extract_last_response(lines)
+
+    if not result:
+        print(f"Error: no {mode} content found in session.", file=sys.stderr)
+        sys.exit(1)
+
+    print(result)
+
+
+if __name__ == "__main__":
+    main()
