@@ -95,14 +95,17 @@ def get_session_lines(session_id, cwd):
 
 
 def extract_last_response(lines):
+    """Extract the last meaningful assistant content (text, plan, or plan file)."""
     for line in reversed(lines):
-        obj = json.loads(line)
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
         if obj.get("type") != "assistant" or obj.get("isSidechain"):
             continue
         content = obj.get("message", {}).get("content", [])
         if not isinstance(content, list):
             continue
-        texts = []
         for block in content:
             if block.get("type") == "text":
                 t = block.get("text", "").strip()
@@ -110,9 +113,18 @@ def extract_last_response(lines):
                     r"<system-reminder>.*?</system-reminder>", "", t, flags=re.DOTALL
                 ).strip()
                 if t:
-                    texts.append(t)
-        if texts:
-            return "\n\n".join(texts)
+                    return t
+            elif block.get("type") == "tool_use":
+                name = block.get("name", "")
+                if name == "ExitPlanMode":
+                    plan = block.get("input", {}).get("plan", "").strip()
+                    if plan:
+                        return plan
+                if name in ("Write", "Edit"):
+                    fp = block.get("input", {}).get("file_path", "")
+                    if "/.claude/plans/" in fp and os.path.isfile(fp):
+                        with open(fp) as f:
+                            return f.read().strip()
     return None
 
 
