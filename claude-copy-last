@@ -211,6 +211,22 @@ def extract_last_ask(lines):
     return None
 
 
+def notify(title, message):
+    """Show a macOS notification."""
+    if platform.system() != "Darwin":
+        return
+    subprocess.run(
+        [
+            "osascript", "-e",
+            f'display notification "{message}" with title "{title}"',
+        ],
+        stderr=subprocess.DEVNULL,
+    )
+
+
+MODE_LABELS = {"text": "Response", "plan": "Plan", "ask": "Questions"}
+
+
 def main():
     if "--help" in sys.argv or "-h" in sys.argv:
         print(__doc__.strip())
@@ -223,28 +239,41 @@ def main():
     else:
         mode = "text"
 
+    should_notify = "--notify" in sys.argv
+    label = MODE_LABELS[mode]
+
     kitten_bin = find_kitten()
     if not kitten_bin:
+        if should_notify:
+            notify("claude-copy", "kitten binary not found")
         print("Error: kitten binary not found. Is Kitty installed?", file=sys.stderr)
         sys.exit(1)
 
     socket_path = find_kitty_socket()
     if not socket_path:
+        if should_notify:
+            notify("claude-copy", "No Kitty socket found")
         print("Error: no Kitty socket found. Is listen_on configured?", file=sys.stderr)
         sys.exit(1)
 
     pids = get_foreground_pids(kitten_bin, socket_path)
     if not pids:
+        if should_notify:
+            notify("claude-copy", "Could not get PIDs from Kitty")
         print("Error: could not get foreground PIDs from Kitty.", file=sys.stderr)
         sys.exit(1)
 
     session = find_session_by_pid(pids)
     if not session:
+        if should_notify:
+            notify("claude-copy", "No Claude Code session in this tab")
         print("Error: no Claude Code session found for the active tab.", file=sys.stderr)
         sys.exit(1)
 
     lines = get_session_lines(session["sessionId"], session["cwd"])
     if not lines:
+        if should_notify:
+            notify("claude-copy", "Session transcript is empty")
         print("Error: session transcript is empty.", file=sys.stderr)
         sys.exit(1)
 
@@ -256,10 +285,18 @@ def main():
         result = extract_last_response(lines)
 
     if not result:
+        if should_notify:
+            notify("claude-copy", f"No {label.lower()} found")
         print(f"Error: no {mode} content found in session.", file=sys.stderr)
         sys.exit(1)
 
     print(result)
+
+    if should_notify:
+        preview = result[:80].replace('"', '\\"').replace("\n", " ")
+        if len(result) > 80:
+            preview += "..."
+        notify("claude-copy", f"{label} copied")
 
 
 if __name__ == "__main__":

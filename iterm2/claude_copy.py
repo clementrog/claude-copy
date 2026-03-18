@@ -168,12 +168,26 @@ def extract_last_ask(lines):
     return None
 
 
+MODE_LABELS = {"text": "Response", "plan": "Plan", "ask": "Questions"}
+
+
 def copy_to_clipboard(text):
     subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
 
 
+def notify(title, message):
+    subprocess.run(
+        [
+            "osascript", "-e",
+            f'display notification "{message}" with title "{title}"',
+        ],
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def do_copy(job_pid, root_pid, mode):
     """Core logic: find session, extract content, copy to clipboard."""
+    label = MODE_LABELS.get(mode, mode)
     pids = set()
     if job_pid:
         pids.add(int(job_pid))
@@ -199,9 +213,10 @@ def do_copy(job_pid, root_pid, mode):
         result = extract_last_response(lines)
 
     if not result:
-        return f"No {mode} content found"
+        return f"No {label.lower()} found"
 
     copy_to_clipboard(result)
+    notify("claude-copy", f"{label} copied")
     return None
 
 
@@ -220,8 +235,7 @@ async def main(connection):
         root_pid = await session.async_get_variable("pid")
         err = do_copy(job_pid, root_pid, "text")
         if err:
-            alert = iterm2.Alert("claude-copy", err)
-            await alert.async_run(connection)
+            notify("claude-copy", err)
 
     @iterm2.RPC
     async def claude_copy_plan(session_id=iterm2.Reference("id")):
@@ -232,8 +246,7 @@ async def main(connection):
         root_pid = await session.async_get_variable("pid")
         err = do_copy(job_pid, root_pid, "plan")
         if err:
-            alert = iterm2.Alert("claude-copy", err)
-            await alert.async_run(connection)
+            notify("claude-copy", err)
 
     @iterm2.RPC
     async def claude_copy_ask(session_id=iterm2.Reference("id")):
@@ -244,8 +257,7 @@ async def main(connection):
         root_pid = await session.async_get_variable("pid")
         err = do_copy(job_pid, root_pid, "ask")
         if err:
-            alert = iterm2.Alert("claude-copy", err)
-            await alert.async_run(connection)
+            notify("claude-copy", err)
 
     await claude_copy_response.async_register(connection)
     await claude_copy_plan.async_register(connection)
