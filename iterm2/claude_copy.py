@@ -19,10 +19,12 @@ Setup:
      - claude_copy_ask(session_id: id)
 """
 import iterm2
+import asyncio
 import json
 import os
 import re
 import glob
+import shlex
 import subprocess
 import logging
 
@@ -196,6 +198,24 @@ def extract_last_ask(lines):
     return None
 
 
+def extract_last_ask_raw(lines):
+    """Return the raw input dict from the last AskUserQuestion tool_use block."""
+    for line in reversed(lines):
+        obj = json.loads(line)
+        if obj.get("type") != "assistant" or obj.get("isSidechain"):
+            continue
+        content = obj.get("message", {}).get("content", [])
+        if not isinstance(content, list):
+            continue
+        for block in reversed(content):
+            if (
+                block.get("type") == "tool_use"
+                and block.get("name") == "AskUserQuestion"
+            ):
+                return block.get("input", {})
+    return None
+
+
 MODE_LABELS = {"text": "Response", "plan": "Plan", "ask": "Questions"}
 
 
@@ -204,11 +224,50 @@ def copy_to_clipboard(text):
 
 
 def notify(title, message):
-    escaped = message.replace("\\", "\\\\").replace('"', '\\"')
+    """Fire-and-forget notification via terminal-notifier. No tab selection."""
     subprocess.Popen(
-        ["osascript", "-e", f'display notification "{escaped}" with title "{title}"'],
+        [
+            "terminal-notifier",
+            "-title", title,
+            "-message", message,
+            "-sender", "com.googlecode.iterm2",
+        ],
+        stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+async def notify_interactive(title, message, session_id, connection, actions=None):
+    """Show notification via terminal-notifier. On click, activate the session's tab.
+
+    Returns the selected action label, or None if dismissed/timed out.
+    """
+    cmd = [
+        "terminal-notifier",
+        "-title", title,
+        "-message", message,
+        "-sender", "com.googlecode.iterm2",
+        "-timeout", "30",
+    ]
+    if actions:
+        cmd.extend(["-actions", ",".join(actions)])
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    stdout, _ = await proc.communicate()
+
+    if proc.returncode == 0:  # User clicked
+        selected = stdout.decode().strip()
+        # Activate the session's tab
+        app = await iterm2.async_get_app(connection)
+        session = app.get_session_by_id(session_id)
+        if session:
+            await session.async_activate(select_tab=True, order_window_front=True)
+        return selected
+    return None
 
 
 def do_copy(job_pid, root_pid, mode):
@@ -257,23 +316,65 @@ async def main(connection):
     app = await iterm2.async_get_app(connection)
     log.info("claude-copy RPC registered")
 
+    async def _handle_notification(message, session_id, connection):
+        """Show notification. On click, select the session's tab."""
+        await notify_interactive(
+            "claude-copy", message, session_id, connection, actions=["Open"]
+        )
+
+    async def _handle_ask_notification(question_text, option_labels, session_id, connection):
+        """Show ask notification with option buttons. On selection, send answer to session."""
+        selected = await notify_interactive(
+            "claude-copy", question_text, session_id, connection, actions=option_labels
+        )
+        if selected and selected in option_labels:
+            idx = option_labels.index(selected) + 1
+            app = await iterm2.async_get_app(connection)
+            session = app.get_session_by_id(session_id)
+            if session:
+                await session.async_send_text(f"{idx}\n")
+
     async def _do(session_id, mode):
-        # Re-fetch app to get fresh state
         app_now = await iterm2.async_get_app(connection)
-        window = app_now.current_window
-        if not window:
-            notify("claude-copy", "No active window")
-            return
-        iterm_session = window.current_tab.current_session
+        iterm_session = app_now.get_session_by_id(session_id)
         if not iterm_session:
-            notify("claude-copy", "No active session")
+            notify("claude-copy", "Session not found")
             return
+
         job_pid = await iterm_session.async_get_variable("jobPid")
         root_pid = await iterm_session.async_get_variable("pid")
-        tty = await iterm_session.async_get_variable("tty")
-        log.debug(f"_do: mode={mode} session_id={iterm_session.session_id} jobPid={job_pid} pid={root_pid} tty={tty}")
+        log.debug(f"_do: mode={mode} session_id={session_id} jobPid={job_pid} pid={root_pid}")
         success, message = do_copy(job_pid, root_pid, mode)
-        notify("claude-copy", message)
+
+        if mode == "ask" and success:
+            # Get raw ask data for interactive notification
+            pids = {int(p) for p in [job_pid, root_pid] if p}
+            session_data = find_session_by_pid(pids)
+            if session_data:
+                lines = get_session_lines(session_data["sessionId"], session_data["cwd"])
+                ask_raw = extract_last_ask_raw(lines)
+                questions = ask_raw.get("questions", []) if ask_raw else []
+                if questions and questions[0].get("options"):
+                    q = questions[0]
+                    question_text = q.get("question", "")
+                    if q.get("header"):
+                        question_text = f"{q['header']}: {question_text}"
+                    options = q["options"]
+                    option_labels = [
+                        o.get("label", f"Option {i+1}") for i, o in enumerate(options)
+                    ]
+
+                    asyncio.create_task(
+                        _handle_ask_notification(
+                            question_text, option_labels, session_id, connection
+                        )
+                    )
+                    return
+
+        # Non-ask or ask without options: simple notification with tab selection on click
+        asyncio.create_task(
+            _handle_notification(message, session_id, connection)
+        )
 
     @iterm2.RPC
     async def claude_copy_response(session_id=iterm2.Reference("id")):
