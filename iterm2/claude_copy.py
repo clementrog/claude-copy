@@ -216,6 +216,69 @@ def extract_last_ask_raw(lines):
     return None
 
 
+def extract_pending_permission(lines):
+    """Check if Claude is waiting for tool permission approval.
+
+    Returns (tool_name, summary) if a tool_use has no matching tool_result,
+    or None if nothing is pending.
+    """
+    last_assistant = None
+    last_assistant_idx = None
+    for i in range(len(lines) - 1, -1, -1):
+        try:
+            obj = json.loads(lines[i])
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if obj.get("type") == "assistant" and not obj.get("isSidechain"):
+            last_assistant = obj
+            last_assistant_idx = i
+            break
+
+    if not last_assistant:
+        return None
+
+    content = last_assistant.get("message", {}).get("content", [])
+    if not isinstance(content, list):
+        return None
+
+    tool_uses = [b for b in content if b.get("type") == "tool_use"]
+    if not tool_uses:
+        return None
+
+    # Collect tool_use ids that already have a tool_result
+    answered_ids = set()
+    for line in lines[last_assistant_idx + 1 :]:
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if obj.get("type") == "user":
+            for block in obj.get("message", {}).get("content", []):
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    answered_ids.add(block.get("tool_use_id"))
+
+    pending = [tu for tu in tool_uses if tu.get("id") not in answered_ids]
+    if not pending:
+        return None
+
+    tu = pending[0]
+    name = tu.get("name", "Unknown")
+    inp = tu.get("input", {})
+
+    if name == "Bash":
+        summary = inp.get("command", "")[:120]
+    elif name in ("Read", "Write", "Edit"):
+        summary = inp.get("file_path", "")
+    elif name == "Glob":
+        summary = inp.get("pattern", "")
+    elif name == "Grep":
+        summary = f"/{inp.get('pattern', '')}/"
+    else:
+        summary = name
+
+    return (name, summary)
+
+
 MODE_LABELS = {"text": "Response", "plan": "Plan", "ask": "Questions"}
 
 
@@ -231,6 +294,7 @@ def notify(title, message):
             "-title", title,
             "-message", message,
             "-sender", "com.googlecode.iterm2",
+            "-activate", "com.googlecode.iterm2",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -247,6 +311,7 @@ async def notify_interactive(title, message, session_id, connection, actions=Non
         "-title", title,
         "-message", message,
         "-sender", "com.googlecode.iterm2",
+        "-activate", "com.googlecode.iterm2",
         "-timeout", "30",
     ]
     if actions:
@@ -334,6 +399,21 @@ async def main(connection):
             if session:
                 await session.async_send_text(f"{idx}\n")
 
+    async def _handle_permission_notification(tool_name, summary, session_id, connection):
+        """Show permission notification with Yes/No. Send keystroke on selection."""
+        msg = f"{tool_name}: {summary}" if summary else tool_name
+        selected = await notify_interactive(
+            "Allow tool?", msg, session_id, connection,
+            actions=["Yes", "No"],
+        )
+        if selected:
+            app = await iterm2.async_get_app(connection)
+            session = app.get_session_by_id(session_id)
+            if session:
+                key = {"Yes": "y", "No": "n"}.get(selected)
+                if key:
+                    await session.async_send_text(f"{key}\n")
+
     async def _do(session_id, mode):
         app_now = await iterm2.async_get_app(connection)
         iterm_session = app_now.get_session_by_id(session_id)
@@ -346,32 +426,44 @@ async def main(connection):
         log.debug(f"_do: mode={mode} session_id={session_id} jobPid={job_pid} pid={root_pid}")
         success, message = do_copy(job_pid, root_pid, mode)
 
-        if mode == "ask" and success:
-            # Get raw ask data for interactive notification
+        if mode == "ask":
             pids = {int(p) for p in [job_pid, root_pid] if p}
             session_data = find_session_by_pid(pids)
             if session_data:
                 lines = get_session_lines(session_data["sessionId"], session_data["cwd"])
-                ask_raw = extract_last_ask_raw(lines)
-                questions = ask_raw.get("questions", []) if ask_raw else []
-                if questions and questions[0].get("options"):
-                    q = questions[0]
-                    question_text = q.get("question", "")
-                    if q.get("header"):
-                        question_text = f"{q['header']}: {question_text}"
-                    options = q["options"]
-                    option_labels = [
-                        o.get("label", f"Option {i+1}") for i, o in enumerate(options)
-                    ]
 
+                if success:
+                    # Check for AskUserQuestion with options
+                    ask_raw = extract_last_ask_raw(lines)
+                    questions = ask_raw.get("questions", []) if ask_raw else []
+                    if questions and questions[0].get("options"):
+                        q = questions[0]
+                        question_text = q.get("question", "")
+                        if q.get("header"):
+                            question_text = f"{q['header']}: {question_text}"
+                        options = q["options"]
+                        option_labels = [
+                            o.get("label", f"Option {i+1}") for i, o in enumerate(options)
+                        ]
+                        asyncio.create_task(
+                            _handle_ask_notification(
+                                question_text, option_labels, session_id, connection
+                            )
+                        )
+                        return
+
+                # Check for pending tool permission
+                perm = extract_pending_permission(lines)
+                if perm:
+                    tool_name, summary = perm
                     asyncio.create_task(
-                        _handle_ask_notification(
-                            question_text, option_labels, session_id, connection
+                        _handle_permission_notification(
+                            tool_name, summary, session_id, connection
                         )
                     )
                     return
 
-        # Non-ask or ask without options: simple notification with tab selection on click
+        # Default: simple notification with tab selection on click
         asyncio.create_task(
             _handle_notification(message, session_id, connection)
         )
